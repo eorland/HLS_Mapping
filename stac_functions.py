@@ -34,7 +34,7 @@ def get_lpdaac_creds():
 def get_hls_stack(gdf, start, end, creds=False,
                   collections=['HLSL30.v2.0', 'HLSS30.v2.0'],
                   cloud_cover_threshold=None,resolution=90,
-                  epsg=6933,mask=True):
+                  epsg=6933,mask_type='cloud'):
     
     '''Returns time series of HLS imagery for an arbitrary GeoDataFrame object.'''
     
@@ -53,7 +53,7 @@ def get_hls_stack(gdf, start, end, creds=False,
  
     print('Total matches for search:',search.matched())
     
-    item_list = list(search.get_items())
+    item_list = list(search.items())
     
     ls_ids = [item for item in item_list if 'L30' in item.id] # Landsat IDs
     s_ids = [item for item in item_list if 'S30' in item.id] # Sentinel IDs
@@ -121,18 +121,27 @@ def get_hls_stack(gdf, start, end, creds=False,
         else:
             print('Final number of cloud-filtered scenes:',data.shape[0])        
         
-    if mask:
+    if mask_type.lower()=='none':
+        return data
+    
+    # if mask is specified, define bitmask
+    elif mask_type.lower()=='cloud':
         # Make a bitmask---when we `bitwise-and` it with the data, it leaves just the 4 bits we care about
-        mask_bitfields = [1, 2, 3, 4]  # cloud, adjacent to cloud shadow, shadow, snow
-        bitmask = 0
-        for field in mask_bitfields:
-            bitmask |= 1 << field
+        mask_bitfields = [0, 1, 2, 3, 4]  # cloud, adjacent to cloud shadow, shadow, snow
+    
+    elif mask_type.lower()=='all':
+        mask_bitfields = [0, 1, 2, 3, 4, 5]  # cloud, adjacent to cloud shadow, shadow, snow
+    
+    # apply it
+    bitmask = 0
+    for field in mask_bitfields:
+        bitmask |= 1 << field
 
-        bin(bitmask)
-        
-        data_qa = data.sel(band="Fmask").astype("uint16")
-        data_bad = data_qa & bitmask  # just look at those 4 bits
-        data = data.where(data_bad == 0)  # mask pixels where any one of those bits are set
+    bin(bitmask)
+       
+    data_qa = data.sel(band="Fmask").astype("uint16")
+    data_bad = data_qa & bitmask  # just look at those 4 bits
+    data = data.where(data_bad == 0)  # mask pixels where any one of those bits are set
     
     return data
 
@@ -140,7 +149,7 @@ def calc_dnbr(gdf, fire_start, fire_end,
               pre_offset=1, post_offset=2,
               cloud_cover_threshold=None,
               epsg=6933,resolution=90,
-              creds=None,mask=True):
+              creds=None,mask_type='cloud'):
     
     '''Application-specific use case of get_hls_stack().
        Because API credentials are needed for access, they 
@@ -159,8 +168,8 @@ def calc_dnbr(gdf, fire_start, fire_end,
     bounds = gdf.to_crs('EPSG:4326').total_bounds
     minx, miny, maxx, maxy = bounds[0], bounds[1], bounds[2], bounds[3]
 
-    pre_start = (pd.to_datetime(fire_start) - DateOffset(months=pre_offset)).strftime('%Y-%m')
-    pre_end = fire_start # the end of the prefire period is the start of the fire! 
+    pre_start = (pd.to_datetime(fire_start) - DateOffset(months=pre_offset+1)).strftime('%Y-%m')
+    pre_end = (pd.to_datetime(fire_start) - DateOffset(months=pre_offset)).strftime('%Y-%m')
 
     post_start = (pd.to_datetime(fire_end) + DateOffset(days=1)).strftime('%Y-%m-%d')
     post_end = (pd.to_datetime(fire_end) + DateOffset(months=post_offset)).strftime('%Y-%m-%d')
@@ -178,7 +187,7 @@ def calc_dnbr(gdf, fire_start, fire_end,
     pre_fire_data = get_hls_stack(gdf,pre_start,pre_end,
                                   creds=False,epsg=epsg,resolution=resolution,
                                   cloud_cover_threshold=cloud_cover_threshold,
-                                  mask=mask)
+                                  mask_type=mask_type)
     
     pre_nir = pre_fire_data.sel(band='NIR').median("time", keep_attrs=True)
     pre_swir1 = pre_fire_data.sel(band='SWIR1').median("time", keep_attrs=True)
@@ -187,7 +196,7 @@ def calc_dnbr(gdf, fire_start, fire_end,
     post_data = get_hls_stack(gdf, post_start, 
                               post_end, creds=False,
                               cloud_cover_threshold=cloud_cover_threshold,
-                              mask=mask)
+                              mask_type=mask_type)
     
     if (pre_fire_data is None) or (post_data is None):
         dnbr = None
@@ -199,9 +208,8 @@ def calc_dnbr(gdf, fire_start, fire_end,
     post_nbr = (post_nir - post_swir1)/((post_nir + post_swir1) + 1e-10)
     
     dnbr = pre_nbr - post_nbr
-    #dnbr = dnbr.where(dnbr>0)
-    dnbr.rio.write_crs('EPSG:6933',inplace=True)
-    
+    dnbr.rio.write_crs('EPSG:'+str(epsg),inplace=True)
+
     return dnbr.compute(), creds # return creds to reuse!
 
 def pc_catalog():
