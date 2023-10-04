@@ -146,10 +146,12 @@ def get_hls_stack(gdf, start, end, creds=False,
     return data
 
 def calc_dnbr(gdf, fire_start, fire_end, 
-              pre_offset=1, post_offset=2,
-              cloud_cover_threshold=None,
+              pre_offset=1,pre_offset_range=2,post_offset=2,
+              gdf_id=None,cloud_cover_threshold=None,
               epsg=6933,resolution=90,
-              creds=None,mask_type='cloud'):
+              creds=None,mask_type='cloud',
+              composites=True,log_path=None,
+              write_path=None):
     
     '''Application-specific use case of get_hls_stack().
        Because API credentials are needed for access, they 
@@ -168,7 +170,7 @@ def calc_dnbr(gdf, fire_start, fire_end,
     bounds = gdf.to_crs('EPSG:4326').total_bounds
     minx, miny, maxx, maxy = bounds[0], bounds[1], bounds[2], bounds[3]
 
-    pre_start = (pd.to_datetime(fire_start) - DateOffset(months=pre_offset+1)).strftime('%Y-%m')
+    pre_start = (pd.to_datetime(fire_start) - DateOffset(months=pre_offset+pre_offset_range)).strftime('%Y-%m')
     pre_end = (pd.to_datetime(fire_start) - DateOffset(months=pre_offset)).strftime('%Y-%m')
 
     post_start = (pd.to_datetime(fire_end) + DateOffset(days=1)).strftime('%Y-%m-%d')
@@ -189,18 +191,40 @@ def calc_dnbr(gdf, fire_start, fire_end,
                                   cloud_cover_threshold=cloud_cover_threshold,
                                   mask_type=mask_type)
     
-    pre_nir = pre_fire_data.sel(band='NIR').median("time", keep_attrs=True)
-    pre_swir1 = pre_fire_data.sel(band='SWIR1').median("time", keep_attrs=True)
-    pre_nbr = (pre_nir - pre_swir1)/((pre_nir + pre_swir1) + 1e-10)
-    
-    post_data = get_hls_stack(gdf, post_start, 
-                              post_end, creds=False,
-                              cloud_cover_threshold=cloud_cover_threshold,
-                              mask_type=mask_type)
+    post_fire_data = get_hls_stack(gdf, post_start, 
+                                   post_end, creds=False,
+                                   cloud_cover_threshold=cloud_cover_threshold,
+                                   mask_type=mask_type)
     
     if (pre_fire_data is None) or (post_data is None):
         dnbr = None
         return dnbr, creds
+    
+    ######## Composite Generation, Logging, And Saving #########
+    
+    if composites:
+        
+        assert gdf_id is not None,"No ID provided for file writing. Please specify a column for gdf_id"
+        
+        id_attribute = gdf[gdf_id].unique()[0]
+        pre_fire_rgb_path = f"pre_fire_composite_{id_attribute}_{pre_start}_{pre_end}_{cloud_cover_threshold}.tif"
+        post_fire_rgb_path = f"post_fire_composite_{id_attribute}_{post_start}_{post_end}_{cloud_cover_threshold}.tif"
+        
+        if write_path:
+            pre_fire_rgb_path = os.path.join(write_path,pre_fire_rgb_path)
+            post_fire_rgb_path = os.path.join(write_path,post_fire_rgb_path)
+
+        pre_fire_rgb = pre_fire_data.sel(band=['Red', 'Green', 'Blue']).median("time", keep_attrs=True).compute()
+        post_fire_rgb = post_fire_data.sel(band=['Red', 'Green', 'Blue']).median("time", keep_attrs=True).compute()
+        
+        pre_fire_rgb.rio.to_raster(pre_fire_rgb_path)
+        post_fire_rgb.rio.to_raster(post_fire_rgb_path) 
+
+    ###################################################
+
+    pre_nir = pre_fire_data.sel(band='NIR').median("time", keep_attrs=True)
+    pre_swir1 = pre_fire_data.sel(band='SWIR1').median("time", keep_attrs=True)
+    pre_nbr = (pre_nir - pre_swir1)/((pre_nir + pre_swir1) + 1e-10)
     
     # pull our composited bands for nbr calculation
     post_nir = post_data.sel(band='NIR').median("time", keep_attrs=True)
