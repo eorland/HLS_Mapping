@@ -31,6 +31,47 @@ def get_lpdaac_creds():
     
     return temp_creds_req
 
+def get_sentinel_stack(geometry, start, end,
+                       cloud_cover_threshold=None,resolution=None,
+                       epsg=6933):
+    
+    if isinstance(geometry, list):
+        bbox = geometry
+        
+    elif isinstance(geometry, gpd.GeoDataFrame):
+        bbox = geometry.to_crs('EPSG:4326').total_bounds
+    else: 
+        print('Please provide either a list of Lat/Lon bounding box coordinates or a GeoDataFrame as the geometry input.')
+        return
+    
+    URL = "https://earth-search.aws.element84.com/v1"
+    catalog = Client.open(URL)
+    items = catalog.search(collections=["sentinel-2-l2a"],
+                           bbox=bbox,
+                           datetime=start+'/'+end).item_collection()
+    
+    print(f'Total matches for search: {len(items)}')
+    
+    if len(items)==0:
+        return
+    
+    if resolution:
+        data = stackstac.stack(items, epsg=epsg, resolution=resolution)
+    
+    else:
+        data = stackstac.stack(items, epsg=epsg)
+    
+    if cloud_cover_threshold:
+        data = data[data["eo:cloud_cover"] < cloud_cover_threshold]
+        if data.shape[0]==0:
+            print('No imagery available for set cloud cover threshold. Returning None...')
+            return None
+        
+        else:
+            print('Final number of cloud-filtered scenes:',data.shape[0])  
+    
+    return data
+
 def get_hls_stack(gdf, start, end, creds=False,
                   collections=['HLSL30.v2.0', 'HLSS30.v2.0'],
                   cloud_cover_threshold=None,resolution=90,
@@ -121,7 +162,7 @@ def get_hls_stack(gdf, start, end, creds=False,
         else:
             print('Final number of cloud-filtered scenes:',data.shape[0])        
         
-    if mask_type.lower()=='none':
+    if mask_type==None:
         return data
     
     # if mask is specified, define bitmask
@@ -150,7 +191,7 @@ def calc_dnbr(gdf, fire_start, fire_end,
               gdf_id=None,cloud_cover_threshold=None,
               epsg=6933,resolution=90,
               creds=None,mask_type='cloud',
-              composites=True,log_path=None,
+              composites=True,logging=False,log_path=None,
               write_path=None):
     
     '''Application-specific use case of get_hls_stack().
@@ -217,8 +258,42 @@ def calc_dnbr(gdf, fire_start, fire_end,
         pre_fire_rgb = pre_fire_data.sel(band=['Red', 'Green', 'Blue']).median("time", keep_attrs=True).compute()
         post_fire_rgb = post_fire_data.sel(band=['Red', 'Green', 'Blue']).median("time", keep_attrs=True).compute()
         
+        pre_fire_visibility = float(pre_fire_rgb.notnull().sum() / (pre_fire_rgb.shape[0]*pre_fire_rgb.shape[1]))
+        post_fire_visibility = float(post_fire_rgb.notnull().sum() / (post_fire_rgb.shape[0]*post_fire_rgb.shape[1]))
+
         pre_fire_rgb.rio.to_raster(pre_fire_rgb_path)
-        post_fire_rgb.rio.to_raster(post_fire_rgb_path) 
+        post_fire_rgb.rio.to_raster(post_fire_rgb_path)
+        
+        if logging:
+            
+            logging_data = {'Attribute': id_attribute,
+                            'FireStart': fire_start,
+                            'FireEnd': fire_end,
+                            'PreOffset': pre_offset,
+                            'PreOffsetRange': pre_offset_range,
+                            'PreFireStart': pre_start,
+                            'PreFireEnd': pre_end,
+                            'PostOffset': post_offset,
+                            'PostStart': post_start,
+                            'PostEnd': post_end,
+                            'CloudCoverThreshold': cloud_cover_threshold,
+                            'MaskType': mask_type,
+                            'EstPreFireViz': pre_fire_visibility,
+                            'EstPostFireViz': post_fire_visibility,
+                            'geometry': gdf.geometry}
+            
+            logging_df = pd.DataFrame.from_dict(logging_data)
+            
+            if log_path:
+                
+                if os.path.exists(log_path):
+                    print('Appending composite metadata to existing logging dataframe')
+                    existing_logging_df = pd.read_csv(log_path,header=True,index=True)
+                    new_logging_df = pd.concat([existing_logging_df, logging_df])
+                else:
+                    new_logging_df = logging_df
+                
+                new_logging_df.to_csv(log_path,header=True,index=True)
 
     ###################################################
 
@@ -234,6 +309,9 @@ def calc_dnbr(gdf, fire_start, fire_end,
     dnbr = pre_nbr - post_nbr
     dnbr.rio.write_crs('EPSG:'+str(epsg),inplace=True)
 
+    if composites:
+        return dnbr.compute(), pre_fire_rgb, post_fire_rgb, creds # return creds and all composites to reuse!    
+    
     return dnbr.compute(), creds # return creds to reuse!
 
 def pc_catalog():
